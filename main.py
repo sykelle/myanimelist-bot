@@ -50,7 +50,7 @@ def health_check():
         'last_check': bot_status['last_check'],
         'completed_anime': bot_status['completed_anime_count'],
         'completed_manga': bot_status['completed_manga_count'],
-        'message': 'Bot check triggered by ping'
+        'message': 'Bot check triggered by ping' if bot_status['status'] == 'idle' else f'Bot status: {bot_status["status"]}'
     })
 
 @app.route('/status')
@@ -74,51 +74,79 @@ def trigger_bot_check():
         # Load previous state
         state = load_state()
         
-        # Get current completed anime and manga
+        # Get current completed lists
         completed_anime = mal_monitor.get_completed_anime()
         completed_manga = mal_monitor.get_completed_manga()
         
-        # Update status with counts
+        if not completed_anime and not completed_manga:
+            logger.error("Failed to fetch MAL data - API may be down")
+            bot_status['status'] = 'error'
+            bot_status['error_message'] = 'Failed to fetch MAL data'
+            return
+        
+        # Update counts
         bot_status['completed_anime_count'] = len(completed_anime) if completed_anime else 0
         bot_status['completed_manga_count'] = len(completed_manga) if completed_manga else 0
         
-        # Check for new completions
+        # Find new completions using today's date
+        current_time = datetime.now()
+        today_date = current_time.date()
+        
+        # Filter for items completed today or later (new completions only)
         new_anime = []
         new_manga = []
         
         if completed_anime:
-            previous_anime_ids = set(state.get('posted_anime', []))
-            new_anime = [anime for anime in completed_anime if anime['mal_id'] not in previous_anime_ids]
+            new_anime = [
+                anime for anime in completed_anime 
+                if anime.get('finished_date') and 
+                datetime.fromisoformat(anime['finished_date'].replace('Z', '+00:00')).date() >= today_date and
+                anime['mal_id'] not in state.get('tweeted_anime_ids', [])
+            ]
         
         if completed_manga:
-            previous_manga_ids = set(state.get('posted_manga', []))
-            new_manga = [manga for manga in completed_manga if manga['mal_id'] not in previous_manga_ids]
+            new_manga = [
+                manga for manga in completed_manga 
+                if manga.get('finished_date') and 
+                datetime.fromisoformat(manga['finished_date'].replace('Z', '+00:00')).date() >= today_date and
+                manga['mal_id'] not in state.get('tweeted_manga_ids', [])
+            ]
         
-        # Post tweets for new completions
+        # Only tweet truly NEW completions (from today forward)
         posted_count = 0
-        if new_anime and twitter_client:
-            for anime in new_anime:
-                # Download anime image
-                image_path = mal_monitor.download_media_image(anime)
-                if twitter_client.post_media_tweet(anime, image_path):
-                    state.setdefault('posted_anime', []).append(anime['mal_id'])
-                    posted_count += 1
-                # Clean up image file
-                if image_path and os.path.exists(image_path):
-                    os.remove(image_path)
-                time.sleep(2)  # Rate limiting
         
+        if new_anime:
+            logger.info(f"Found {len(new_anime)} truly new anime completions from today forward")
+        if new_manga:
+            logger.info(f"Found {len(new_manga)} truly new manga completions from today forward")
+            
+        # Tweet ONE new completion at a time to prevent rate limit abuse
         if new_manga and twitter_client:
-            for manga in new_manga:
-                # Download manga image  
-                image_path = mal_monitor.download_media_image(manga)
-                if twitter_client.post_media_tweet(manga, image_path):
-                    state.setdefault('posted_manga', []).append(manga['mal_id'])
-                    posted_count += 1
-                # Clean up image file
-                if image_path and os.path.exists(image_path):
-                    os.remove(image_path)
-                time.sleep(2)  # Rate limiting
+            # Tweet first new manga
+            manga = new_manga[0]
+            logger.info(f"Tweeting new manga completion: {manga['title']}")
+            image_path = mal_monitor.download_media_image(manga)
+            if twitter_client.post_media_tweet(manga, image_path):
+                state.setdefault('tweeted_manga_ids', []).append(manga['mal_id'])
+                posted_count = 1
+                logger.info(f"SUCCESS: Tweeted new manga - {manga['title']}")
+            # Clean up image file
+            if image_path and os.path.exists(image_path):
+                os.remove(image_path)
+        elif new_anime and twitter_client:
+            # Tweet first new anime if no new manga
+            anime = new_anime[0]
+            logger.info(f"Tweeting new anime completion: {anime['title']}")
+            image_path = mal_monitor.download_media_image(anime)
+            if twitter_client.post_media_tweet(anime, image_path):
+                state.setdefault('tweeted_anime_ids', []).append(anime['mal_id'])
+                posted_count = 1
+                logger.info(f"SUCCESS: Tweeted new anime - {anime['title']}")
+            # Clean up image file
+            if image_path and os.path.exists(image_path):
+                os.remove(image_path)
+        else:
+            logger.info("No new completions from today forward - no tweets needed")
         
         # Save state and update status
         state['last_check'] = datetime.now().isoformat()
@@ -190,20 +218,11 @@ def run_bot():
             logger.info("Bot will continue without Twitter functionality")
             twitter_client = None
     
-    # Initial setup and status check only
+    # Bot is now ready - set to idle without fetching initial counts
+    # Initial counts will be fetched on first ping to avoid startup delays on Render
     logger.info(f"Bot initialized. Monitoring user: {config.mal_username}")
     bot_status['status'] = 'idle'
     bot_status['last_check'] = None
-    
-    # Get initial counts
-    try:
-        completed_anime = mal_monitor.get_completed_anime()
-        completed_manga = mal_monitor.get_completed_manga()
-        bot_status['completed_anime_count'] = len(completed_anime) if completed_anime else 0
-        bot_status['completed_manga_count'] = len(completed_manga) if completed_manga else 0
-        logger.info(f"Found {bot_status['completed_anime_count']} completed anime and {bot_status['completed_manga_count']} completed manga")
-    except Exception as e:
-        logger.error(f"Failed to get initial counts: {str(e)}")
     
     logger.info("Bot is ready. Waiting for ping to trigger checks...")
     
