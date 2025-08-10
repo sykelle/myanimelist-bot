@@ -167,7 +167,8 @@ def trigger_bot_check():
 
 def run_web_server():
     """Run the Flask web server"""
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def run_bot():
     """Main bot execution function"""
@@ -253,11 +254,9 @@ def main():
     run_bot()
 
 if __name__ == "__main__":
-    # Add restart loop for better reliability
-    while True:
-        try:
-            main()
-        except Exception as e:
-            print(f"Bot failed to start: {str(e)}")
-            print("Restarting in 60 seconds...")
-            time.sleep(60)
+    try:
+        main()
+    except Exception as e:
+        print(f"Bot failed to start: {str(e)}")
+        import sys
+        sys.exit(1)
